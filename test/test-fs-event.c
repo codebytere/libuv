@@ -51,6 +51,7 @@ static const char file_prefix_in_subdir[] = "subdir";
 static uv_timer_t timer;
 static int timer_cb_called;
 static int close_cb_called;
+static int watcher_cb_called;
 static int fs_event_created;
 static int fs_event_removed;
 static int fs_event_cb_called;
@@ -1031,6 +1032,66 @@ TEST_IMPL(fs_event_error_reporting) {
 }
 
 #endif  /* defined(__APPLE__) */
+
+static int watcher_called = 0;
+static int fs_called = 0;
+
+static void wqc_test_fs_cb(uv_fs_t* fst) {
+  fprintf(stderr, "%s %d\n", __FILE__, __LINE__); 
+  fs_called = 1;
+}
+
+static void wqc_test_watcher_cb(uv_loop_t* loop) {
+  watcher_called = 1;
+}
+
+TEST_IMPL(loop_queue_watcher_test) {
+
+  // Create an open temp file
+  const char * filename = "test.txt";
+  int r;
+  uv_os_fd_t file;
+  uv_fs_t req;
+  r = uv_fs_open(NULL, &req, filename, O_WRONLY | O_CREAT, S_IWUSR | S_IRUSR, NULL);
+  ASSERT(r == 0);
+  file = (uv_os_fd_t)req.result;
+  uv_fs_req_cleanup(&req);
+
+  // create the loop
+  uv_loop_t loop;
+  ASSERT(0 == uv_loop_init(&loop));
+
+  // listen for queue changes
+  uv_loop_set_watcher_queue_changed_callback(&loop, wqc_test_watcher_cb);
+
+  // queue an async write
+  uv_buf_t buf;
+  buf.base = "Hello, world!";
+  buf.len = strlen(buf.base);
+  r = uv_fs_write(&loop, &req, file, &buf, 1, 0, wqc_test_fs_cb);
+  ASSERT(r == 0);
+
+  do {
+    uv_run(&loop, UV_RUN_ONCE);
+  } while (fs_called == 0);
+
+  ASSERT(watcher_cb_called == 1);
+
+  uv_fs_req_cleanup(&req);
+
+  // cleanup
+  r = uv_fs_close(NULL, &req, file, NULL);
+  ASSERT(r == 0);
+  uv_fs_req_cleanup(&req);
+  r = uv_fs_unlink(NULL, &req, file, NULL);
+  ASSERT(r == 0);
+  uv_fs_req_cleanup(&req);
+
+  uv_loop_close(&loop);
+
+  MAKE_VALGRIND_HAPPY();
+  return 0;
+}
 
 TEST_IMPL(fs_event_watch_invalid_path) {
 #if defined(NO_FS_EVENTS)
