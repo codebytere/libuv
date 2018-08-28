@@ -51,7 +51,6 @@ static const char file_prefix_in_subdir[] = "subdir";
 static uv_timer_t timer;
 static int timer_cb_called;
 static int close_cb_called;
-static int watcher_cb_called;
 static int fs_event_created;
 static int fs_event_removed;
 static int fs_event_cb_called;
@@ -1033,21 +1032,24 @@ TEST_IMPL(fs_event_error_reporting) {
 
 #endif  /* defined(__APPLE__) */
 
-static int watcher_called = 0;
-static int fs_called = 0;
+static int lqw_fs_called = 0;
+static int lqw_file_changed = 0;
+static int lqw_watcher_called = 0;
 
-static void wqc_test_fs_cb(uv_fs_t* fst) {
-  fprintf(stderr, "%s %d\n", __FILE__, __LINE__); 
-  fs_called = 1;
+static void lqw_test_fs_cb(uv_fs_t* fst) {
+  lqw_fs_called = 1;
 }
-
-static void wqc_test_watcher_cb(uv_loop_t* loop) {
-  watcher_called = 1;
+static void lqw_file_changed_cb(uv_fs_event_t* handle, const char* filename, int events, int status) {
+  uv_fs_event_stop(handle);
+  lqw_file_changed = 1;
+}
+static void lqw_test_watcher_cb(uv_loop_t* loop) {
+  lqw_watcher_called = 1;
 }
 
 TEST_IMPL(loop_queue_watcher_test) {
 
-  // Create an open temp file
+  /* Create an open temp file */
   const char * filename = "test.txt";
   int r;
   uv_os_fd_t file;
@@ -1057,33 +1059,44 @@ TEST_IMPL(loop_queue_watcher_test) {
   file = (uv_os_fd_t)req.result;
   uv_fs_req_cleanup(&req);
 
-  // create the loop
+  /* Create the loop. */
   uv_loop_t loop;
-  ASSERT(0 == uv_loop_init(&loop));
+  r = uv_loop_init(&loop);
+  ASSERT(r == 0);
 
-  // listen for queue changes
-  uv_loop_set_watcher_queue_changed_callback(&loop, wqc_test_watcher_cb);
+  /* Listen for watcher queue changes */
+  uv_loop_set_watcher_queue_changed_callback(&loop, lqw_test_watcher_cb);
 
-  // queue an async write
+  /* Watch the file for changes */
+  uv_fs_event_t fs_event;
+  r = uv_fs_event_init(&loop, &fs_event);
+  ASSERT(r == 0);
+  r = uv_fs_event_start(&fs_event, lqw_file_changed_cb, filename, 0);
+  ASSERT(r == 0);
+
+  /* Queue an async write */
   uv_buf_t buf;
   buf.base = "Hello, world!";
   buf.len = strlen(buf.base);
-  r = uv_fs_write(&loop, &req, file, &buf, 1, 0, wqc_test_fs_cb);
+  r = uv_fs_write(&loop, &req, file, &buf, 1, 0, lqw_test_fs_cb);
   ASSERT(r == 0);
 
-  do {
-    uv_run(&loop, UV_RUN_ONCE);
-  } while (fs_called == 0);
-
-  ASSERT(watcher_cb_called == 1);
+  /* Run the loop. Confirm that the write finished, fs event fired */
+  r = uv_run(&loop, UV_RUN_DEFAULT);
+  ASSERT(r == 0);
+  ASSERT(lqw_file_changed);
+  ASSERT(lqw_fs_called);
 
   uv_fs_req_cleanup(&req);
 
-  // cleanup
+  /* Now for the actual test: confirm the Loop Queue Watcher was called! */
+  ASSERT(lqw_watcher_called);
+
+  /* Cleanup */
   r = uv_fs_close(NULL, &req, file, NULL);
   ASSERT(r == 0);
   uv_fs_req_cleanup(&req);
-  r = uv_fs_unlink(NULL, &req, file, NULL);
+  r = uv_fs_unlink(NULL, &req, filename, NULL);
   ASSERT(r == 0);
   uv_fs_req_cleanup(&req);
 
